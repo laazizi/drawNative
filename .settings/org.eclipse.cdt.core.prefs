@@ -1,0 +1,6 @@
+eclipse.preferences.version=1
+environment/project/com.android.toolchain.gcc.1588103347/NDK/delimiter=\:
+environment/project/com.android.toolchain.gcc.1588103347/NDK/operation=replace
+environment/project/com.android.toolchain.gcc.1588103347/NDK/value=/home/mo/Bureau/adt-bundle-linux-x86-20131030/android-ndk-r9b/
+environment/project/com.android.toolchain.gcc.1588103347/append=true
+environment/project/com.android.toolchain.gcc.1588103347/appendContributed=true

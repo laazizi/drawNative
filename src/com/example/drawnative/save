@@ -1,0 +1,587 @@
+package com.example.drawnative;
+
+import ioio.lib.api.DigitalOutput;
+import ioio.lib.api.IOIO;
+import ioio.lib.api.PwmOutput;
+import ioio.lib.api.exception.ConnectionLostException;
+import ioio.lib.util.BaseIOIOLooper;
+import ioio.lib.util.IOIOLooper;
+import ioio.lib.util.android.IOIOActivity;
+
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.opencv.android.BaseLoaderCallback;
+import org.opencv.android.CameraBridgeViewBase;
+import org.opencv.android.OpenCVLoader;
+import org.opencv.android.CameraBridgeViewBase.CvCameraViewFrame;
+import org.opencv.android.CameraBridgeViewBase.CvCameraViewListener2;
+import org.opencv.android.LoaderCallbackInterface;
+import org.opencv.android.Utils;
+import org.opencv.core.Core;
+import org.opencv.core.CvException;
+import org.opencv.core.CvType;
+import org.opencv.core.Mat;
+import org.opencv.core.MatOfPoint;
+import org.opencv.core.Point;
+import org.opencv.core.Scalar;
+import org.opencv.core.Size;
+import org.opencv.imgproc.Imgproc;
+
+import com.android.future.usb.UsbAccessory;
+import com.android.future.usb.UsbManager;
+
+import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
+import android.app.Activity;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.util.Log;
+import android.view.Menu;
+import android.view.View;
+import android.view.View.OnClickListener;
+import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
+import android.widget.CompoundButton.OnCheckedChangeListener;
+import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.SeekBar;
+import android.widget.SeekBar.OnSeekBarChangeListener;
+import android.widget.Spinner;
+import android.widget.TextView;
+import android.widget.Toast;
+
+public class MainActivity extends Activity implements CvCameraViewListener2,
+		Runnable, android.widget.RadioGroup.OnCheckedChangeListener {
+	private CameraBridgeViewBase mOpenCvCameraView;
+	protected static final String TAG = "laazizi";
+	private int mViewMode;
+	private static final int VIEW_MODE_CANNY = 2;
+	private Mat mRgba;
+	private Mat mIntermediateMat;
+	private Mat mMat;
+	private double vala = 40;
+	private double valb = 40;
+	private calculAngle cal;
+	private ArrayList<MatOfPoint> contours;
+
+	private Mat mGray;
+	private boolean clean = false;
+	private CheckBox checkbox;
+	private RadioButton sp;
+	private int RETR = Imgproc.RETR_LIST;
+	private int APPROX = Imgproc.CHAIN_APPROX_NONE;
+	private boolean startWrite = false;
+	// **********************************************
+	private ImageView imview;
+	private Mat hierarchy;
+	private Scalar color;
+	// ********************************
+
+	private static final String ACTION_USB_PERMISSION = "com.google.android.DemoKit.action.USB_PERMISSION";
+
+	private UsbManager mUsbManager;
+	private PendingIntent mPermissionIntent;
+	private boolean mPermissionRequestPending;
+	private SeekBar ledSeekBar;
+
+	UsbAccessory mAccessory;
+	ParcelFileDescriptor mFileDescriptor;
+	FileInputStream mInputStream;
+	FileOutputStream mOutputStream;
+
+	public static final byte LED_SERVO_COMMAND = 4;
+	public static final byte SERVO_COMMAND_1 = 1;
+	public static final byte SERVO_COMMAND_2 = 2;
+	public static final byte SERVO_COMMAND_PEN_3 = 3;
+	private int index;
+	private int total;
+	private final BroadcastReceiver mUsbReceiver = new BroadcastReceiver() {
+		@Override
+		public void onReceive(Context context, Intent intent) {
+			String action = intent.getAction();
+			if (ACTION_USB_PERMISSION.equals(action)) {
+				synchronized (this) {
+					UsbAccessory accessory = UsbManager.getAccessory(intent);
+					if (intent.getBooleanExtra(
+							UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+						openAccessory(accessory);
+					} else {
+						Log.d(TAG, "permission denied for accessory "
+								+ accessory);
+
+						CharSequence text = "pas accessory erreur ";
+						int duration = Toast.LENGTH_SHORT;
+
+						Toast toast = Toast.makeText(context, text, duration);
+						toast.show();
+					}
+					mPermissionRequestPending = false;
+				}
+			} else if (UsbManager.ACTION_USB_ACCESSORY_DETACHED.equals(action)) {
+				UsbAccessory accessory = UsbManager.getAccessory(intent);
+				if (accessory != null && accessory.equals(mAccessory)) {
+					CharSequence text = "detached accessory ";
+					int duration = Toast.LENGTH_SHORT;
+
+					Toast toast = Toast.makeText(context, text, duration);
+					toast.show();
+					closeAccessory();
+				}
+			}
+		}
+	};
+
+	private void closeAccessory() {
+		enableControls(false);
+
+		try {
+			if (mFileDescriptor != null) {
+				mFileDescriptor.close();
+			}
+		} catch (IOException e) {
+		} finally {
+			mFileDescriptor = null;
+			mAccessory = null;
+		}
+	}
+
+	public void sendCommand(byte command, byte target, int value) {
+		byte[] buffer = new byte[3];
+		if (value > 255)
+			value = 255;
+
+		buffer[0] = command;
+		buffer[1] = target;
+		buffer[2] = (byte) value;
+		if (mOutputStream != null && buffer[1] != -1) {
+			try {
+				mOutputStream.write(buffer);
+			} catch (IOException e) {
+				Log.e(TAG, "write failed", e);
+			}
+		}
+	}
+
+	public void run() {
+		int ret = 0;
+		byte[] buffer = new byte[16384];
+		int i;
+
+		while (ret >= 0) {
+			try {
+				ret = mInputStream.read(buffer);
+			} catch (IOException e) {
+				break;
+			}
+
+			i = 0;
+			while (i < ret) {
+				int len = ret - i;
+
+				switch (buffer[i]) {
+				default:
+					Log.d(TAG, "unknown msg: " + buffer[i]);
+					i = len;
+					break;
+				}
+			}
+
+		}
+	}
+
+	// *********************************************
+	private BaseLoaderCallback mLoaderCallback = new BaseLoaderCallback(this) {
+		@Override
+		public void onManagerConnected(int status) {
+			switch (status) {
+			case LoaderCallbackInterface.SUCCESS: {
+				Log.i(TAG, "OpenCV loaded successfully");
+
+				// Load native library after(!) OpenCV initialization
+				System.loadLibrary("drawNative");
+
+				mOpenCvCameraView.enableView();
+			}
+				break;
+			default: {
+				super.onManagerConnected(status);
+			}
+				break;
+			}
+		}
+	};
+	private TextView info;
+
+	@Override
+	public void onPause() {
+		super.onPause();
+		if (mOpenCvCameraView != null)
+			mOpenCvCameraView.disableView();
+		closeAccessory();
+	}
+
+	@Override
+	public void onResume() {
+		super.onResume();
+
+		OpenCVLoader.initAsync(OpenCVLoader.OPENCV_VERSION_2_4_3, this,
+				mLoaderCallback);
+		Intent intent = getIntent();
+		if (mInputStream != null && mOutputStream != null) {
+			return;
+
+		}
+
+		UsbAccessory[] accessories = mUsbManager.getAccessoryList();
+		UsbAccessory accessory = (accessories == null ? null : accessories[0]);
+		if (accessory != null) {
+			if (mUsbManager.hasPermission(accessory)) {
+				openAccessory(accessory);
+			} else {
+				synchronized (mUsbReceiver) {
+					if (!mPermissionRequestPending) {
+						mUsbManager.requestPermission(accessory,
+								mPermissionIntent);
+						mPermissionRequestPending = true;
+					}
+				}
+			}
+		} else {
+			Log.d(TAG, "mAccessory is null");
+		}
+	}
+
+	public void onDestroy() {
+		super.onDestroy();
+		if (mOpenCvCameraView != null)
+			mOpenCvCameraView.disableView();
+		unregisterReceiver(mUsbReceiver);
+	}
+
+	@Override
+	public Object onRetainNonConfigurationInstance() {
+		if (mAccessory != null) {
+			return mAccessory;
+		} else {
+			return super.onRetainNonConfigurationInstance();
+		}
+	}
+
+	private void openAccessory(UsbAccessory accessory) {
+		mFileDescriptor = mUsbManager.openAccessory(accessory);
+		if (mFileDescriptor != null) {
+			mAccessory = accessory;
+			FileDescriptor fd = mFileDescriptor.getFileDescriptor();
+			mInputStream = new FileInputStream(fd);
+			mOutputStream = new FileOutputStream(fd);
+			Thread thread = new Thread(null, this, "DemoKit");
+			thread.start();
+			Log.d(TAG, "accessory opened");
+			CharSequence text = "accessory open ";
+			int duration = Toast.LENGTH_SHORT;
+
+			Toast toast = Toast.makeText(getApplicationContext(), text,
+					duration);
+			toast.show();
+			enableControls(true);
+		} else {
+			Log.d(TAG, "accessory open fail");
+			CharSequence text = " open accessory erreur ";
+			int duration = Toast.LENGTH_SHORT;
+
+			Toast toast = Toast.makeText(getApplicationContext(), text,
+					duration);
+			toast.show();
+		}
+	}
+
+	private void enableControls(boolean b) {
+		// TODO write code to disable the GUI
+
+	}
+
+	// **********************************oncreate
+	@Override
+	protected void onCreate(Bundle savedInstanceState) {
+		super.onCreate(savedInstanceState);
+		setContentView(R.layout.activity_main);
+		mOpenCvCameraView = (CameraBridgeViewBase) findViewById(R.id.tutorial2_activity_surface_view);
+		mOpenCvCameraView.setCvCameraViewListener(this);
+
+		mUsbManager = UsbManager.getInstance(this);
+		mPermissionIntent = PendingIntent.getBroadcast(this, 0, new Intent(
+				ACTION_USB_PERMISSION), 0);
+		IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+		filter.addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED);
+		registerReceiver(mUsbReceiver, filter);
+ info=(TextView)findViewById(R.id.info);
+		if (getLastNonConfigurationInstance() != null) {
+			mAccessory = (UsbAccessory) getLastNonConfigurationInstance();
+			openAccessory(mAccessory);
+		}
+
+		RadioGroup rad1 = (RadioGroup) findViewById(R.id.radioGroup1);
+		RadioGroup rad2 = (RadioGroup) findViewById(R.id.radioGroup2);
+		rad1.setOnCheckedChangeListener(this);
+		rad2.setOnCheckedChangeListener(this);
+		Button bput = (Button) findViewById(R.id.button2);
+		bput.setOnClickListener(new OnClickListener() {
+
+			@Override
+			public void onClick(View v) {
+				EditText t1 = (EditText) findViewById(R.id.editText1);
+				EditText t2 = (EditText) findViewById(R.id.editText2);
+				int myx = Integer.decode(t1.getText().toString());
+				int myy = Integer.decode(t2.getText().toString());
+				cal = new calculAngle(myx, myy);
+				sendCommand(SERVO_COMMAND_1, SERVO_COMMAND_1, cal.getT1());
+				sendCommand(SERVO_COMMAND_2, SERVO_COMMAND_2, cal.getT2());
+			}
+		});
+		Button b = (Button) findViewById(R.id.button1);
+		checkbox = (CheckBox) findViewById(R.id.checkBox1);
+		SeekBar s1 = (SeekBar) findViewById(R.id.seekBar1);
+		SeekBar s2 = (SeekBar) findViewById(R.id.seekBar2);
+		s1.setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
+
+			@Override
+			public void onStopTrackingTouch(SeekBar seekBar) {
+				// TODO Auto-generated method stub
+
+			}
+
+			@Override
+			public void onStartTrackingTouch(SeekBar seekBar) {
+				// TODO Auto-generated method stub
+
+			}
+
+			@Override
+			public void onProgressChanged(SeekBar seekBar, int progress,
+					boolean fromUser) {
+				vala = progress;
+
+			}
+		});
+		s2.setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
+
+			@Override
+			public void onStopTrackingTouch(SeekBar seekBar) {
+				// TODO Auto-generated method stub
+
+			}
+
+			@Override
+			public void onStartTrackingTouch(SeekBar seekBar) {
+				// TODO Auto-generated method stub
+
+			}
+
+			@Override
+			public void onProgressChanged(SeekBar seekBar, int progress,
+					boolean fromUser) {
+				valb = progress;
+
+			}
+		});
+
+		b.setOnClickListener(new OnClickListener() {
+
+			@Override
+			public void onClick(View v) {
+				clean = false;
+				if (mOpenCvCameraView != null)
+					mOpenCvCameraView.disableView();
+				imview = (ImageView) findViewById(R.id.imageView1);
+				Bitmap bmpS = Bitmap.createBitmap(mIntermediateMat.width(),
+						mIntermediateMat.height(), Bitmap.Config.ARGB_8888);
+				 
+				Utils.matToBitmap(mIntermediateMat, bmpS);
+				imview.setImageBitmap(bmpS);
+				imview.invalidate();
+				new Thread(new Runnable() {
+
+					private int up = 60;
+					private int down = 0;
+					private int MAXGROUP=30 ;
+					private double myx;
+					private double myy;
+					private double maxxy;
+					private double maxdiag;
+
+					@Override
+					public void run() {
+						
+						
+						maxdiag=Math.sqrt(600*600*2); //max dist
+						try {
+							for (int i = 0; i < contours.size(); i++) {
+								
+								if(contours.get(i).toList().size()>MAXGROUP){ //long min courbe pour clean
+									 
+								cal = new calculAngle(contours.get(i).toList()
+										.get(0).x, contours.get(i).toList()
+										.get(0).y);
+								sendCommand(SERVO_COMMAND_PEN_3, SERVO_COMMAND_PEN_3,up);
+								Thread.sleep(250);
+								
+								sendCommand(SERVO_COMMAND_1, SERVO_COMMAND_1,cal.getT1());
+								sendCommand(SERVO_COMMAND_2, SERVO_COMMAND_2,cal.getT2());
+
+								Thread.sleep(800);
+								sendCommand(SERVO_COMMAND_PEN_3,SERVO_COMMAND_PEN_3, down);
+								Thread.sleep(500);
+								
+								total=contours.size();
+								index=i;
+								for (int j = 1; j < contours.get(i).toList().size(); j++) {
+									maxxy=Math.sqrt(contours.get(i).toList().get(j).x*contours.get(i).toList().get(j).x+contours.get(i).toList().get(j).y*contours.get(i).toList().get(j).y);
+									if ( maxxy<maxdiag && contours.get(i).toList().get(j).x>1 && contours.get(i).toList().get(j).y>1 
+											) {
+										cal = new calculAngle(contours.get(i).toList().get(j).x,contours.get(i).toList().get(j).y);
+										
+										Log.i("*****", "***info**** x="+contours.get(i).toList().get(j).x+"y= "+contours.get(i).toList().get(j).y);
+										sendCommand(SERVO_COMMAND_1,SERVO_COMMAND_1, cal.getT1());										
+										sendCommand(SERVO_COMMAND_2,SERVO_COMMAND_2, cal.getT2());
+										myx=contours.get(i).toList().get(j).x; //pour debug
+										myy=contours.get(i).toList().get(j).y; //pour debug
+										runOnUiThread(new Runnable() {
+											public void run() {
+												info.setText("x"+myx+"y"+myy+" : index"+index +"Total/"+total);
+											}
+										});
+										Thread.sleep(80);
+
+									}
+									j=j+2;								 
+
+								}
+							 
+							}
+							}
+							// go to init pos
+							cal = new calculAngle(10,100);
+							sendCommand(SERVO_COMMAND_PEN_3, SERVO_COMMAND_PEN_3,up);
+							Thread.sleep(100);
+							sendCommand(SERVO_COMMAND_1, SERVO_COMMAND_1,cal.getT1());
+							sendCommand(SERVO_COMMAND_2, SERVO_COMMAND_2,cal.getT2());
+						} catch (InterruptedException e) {
+							// TODO Auto-generated catch block
+							e.printStackTrace();
+						}
+						hierarchy.release();
+					}
+				}).start();
+
+			
+				startWrite = true;
+			}
+		});
+	}
+
+	// ******************************end oncreate
+
+	private void enableUi(final boolean enable) {
+		runOnUiThread(new Runnable() {
+			@Override
+			public void run() {
+				// seekBar1.setEnabled(enable);
+				// seekBar2.setEnabled(enable);
+				checkbox.setEnabled(enable);
+			}
+		});
+	}
+
+	public native int[] FindFeatures(long matAddrGr, long matAddrRgba);
+
+	@Override
+	public void onCameraViewStarted(int width, int height) {
+		mRgba = new Mat(height, width, CvType.CV_8UC4);
+		mIntermediateMat = new Mat(height, width, CvType.CV_8UC4);
+		mGray = new Mat(height, width, CvType.CV_8UC1);
+	}
+
+	@Override
+	public void onCameraViewStopped() {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public Mat onCameraFrame(CvCameraViewFrame inputFrame) {
+		/* 
+		mMat = inputFrame.gray();
+		 
+		 
+		Mat hierarchy = new Mat();
+		contours = new ArrayList<MatOfPoint>();
+		Imgproc.Canny(mMat, mIntermediateMat, vala, valb);		 
+		Imgproc.findContours(mIntermediateMat, contours, hierarchy, RETR,APPROX, new Point(0, 0));
+		
+		 
+		if (clean) {
+			return null;
+		} else {
+			return mIntermediateMat;
+		}*/
+		  mRgba = inputFrame.gray();
+	        contours = new ArrayList<MatOfPoint>();
+	        hierarchy = new Mat();
+
+	     Imgproc.Canny(mRgba, mIntermediateMat, 30, 100);
+	     Imgproc.findContours(mIntermediateMat, contours, hierarchy, Imgproc.RETR_TREE, Imgproc.CHAIN_APPROX_SIMPLE, new Point(0, 0));
+	    /* Mat drawing = Mat.zeros( mIntermediateMat.size(), CvType.CV_8UC3 );
+	     for( int i = 0; i< contours.size(); i++ )
+	     {
+	    Scalar color =new Scalar(Math.random()*255, Math.random()*255, Math.random()*255);
+	     Imgproc.drawContours( drawing, contours, i, color, 2, 8, hierarchy, 0, new Point() );
+	     }*/
+	     hierarchy.release();
+	     Imgproc.drawContours(mIntermediateMat, contours, -1, new Scalar(Math.random()*255, Math.random()*255, Math.random()*255));//, 2, 8, hierarchy, 0, new Point());
+	     // Imgproc.cvtColor(mIntermediateMat, mRgba, Imgproc.COLOR_GRAY2RGBA, 4);
+	    return mIntermediateMat;
+	}
+
+	@Override
+	public void onCheckedChanged(RadioGroup arg0, int arg1) {
+		if (arg0.getId() == R.id.radioGroup1) {
+
+			switch (arg1) {
+			case R.id.radio10:
+				RETR = Imgproc.RETR_LIST;
+			case R.id.radio11:
+				RETR = Imgproc.RETR_CCOMP;
+			case R.id.radio12:
+				RETR = Imgproc.RETR_TREE;
+
+			}
+		}
+		if (arg0.getId() == R.id.radioGroup2) {
+			switch (arg1) {
+			case R.id.radio20:
+				APPROX = Imgproc.CHAIN_APPROX_NONE;
+			case R.id.radio21:
+				APPROX = Imgproc.CHAIN_APPROX_SIMPLE;
+			case R.id.radio22:
+				APPROX = Imgproc.CHAIN_APPROX_TC89_L1;
+			case R.id.radio23:
+				APPROX = Imgproc.CHAIN_APPROX_TC89_KCOS;
+
+			}
+		}
+
+	}
+}
